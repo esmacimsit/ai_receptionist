@@ -3,18 +3,19 @@ import sounddevice as sd
 import time
 import platform
 import warnings
+import re  
 
-# Suppress warnings
+# Gereksiz uyarıları kapat
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-# --- CORE CONFIGURATION ---
+# --- FABRİKA AYARLARI (En Stabil Hali) ---
 FS = 16000
 MODEL_SIZE = "small"   
-SILENCE_DURATION = 2.5  
+SILENCE_DURATION = 2.0  
 THRESHOLD = 0.045       
 BLOCKSIZE = 1024  
 
-# --- HARDWARE DETECTION ---
+# --- DONANIM TESPİTİ ---
 USE_MLX = False
 fw_model = None 
 
@@ -36,7 +37,10 @@ def load_model():
     if backend == "mlx":
         print(f"[SYSTEM] Model loaded: {MODEL_SIZE}. Warming up engine...")
         import mlx_whisper
-        mlx_whisper.transcribe(np.zeros(16000), path_or_hf_repo=f"mlx-community/whisper-{MODEL_SIZE}-mlx")
+        try:
+            mlx_whisper.transcribe(np.zeros(16000), path_or_hf_repo=f"mlx-community/whisper-{MODEL_SIZE}-mlx")
+        except:
+            pass
         print("[SYSTEM] Engine Ready.")
     else:
         from faster_whisper import WhisperModel
@@ -45,19 +49,18 @@ def load_model():
 def transcribe_audio(audio_np):
     text = ""
     
-    # --- PROMPT İLE DİL KISITLAMA (Sadece TR/EN Odaklı) ---
-    # Whisper'a "Sadece bu dilleri bekle" dedik. Bu, taramayı hızlandırır ve hatayı önler.
-    BIASED_PROMPT = "This is a conversation in Turkish or English. Türkçe veya İngilizce konuşuluyor."
-
+    # Prompt: Bias var ama faydalı bir bias.
+    target_prompt = "This is a conversation in Turkish or English. Türkçe veya İngilizce konuşuluyor."
+    
     if USE_MLX:
         import mlx_whisper
         try:
             result = mlx_whisper.transcribe(
                 audio_np,
                 path_or_hf_repo=f"mlx-community/whisper-{MODEL_SIZE}-mlx",
-                language=None,                # Auto-Detect (Ama prompt ile yönlendirilmiş)
+                language=None,                
                 fp16=True,                    
-                initial_prompt=BIASED_PROMPT, # <--- İŞTE BU SATIR KİLİT NOKTA
+                initial_prompt=target_prompt, 
                 condition_on_previous_text=False, 
                 no_speech_threshold=0.6,      
                 logprob_threshold=-1.0,       
@@ -65,41 +68,32 @@ def transcribe_audio(audio_np):
                 temperature=0.0               
             )
             text = result.get("text", "").strip()
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] Transcribe: {e}")
             return ""
     else:
-        # Fallback
-        segments, _ = fw_model.transcribe(audio_np, language=None, initial_prompt=BIASED_PROMPT, beam_size=1)
-        text = "".join(s.text for s in segments).strip()
-
-    # --- SECURITY FIREWALL ---
-    text_lower = text.lower()
-    
-    # 1. HALLUCINATION FILTER
-    yasakli_listesi = [
-        # TR
-        "abone ol", "beğenmeyi", "bildirimleri", "kanalımıza", 
-        "izlediğiniz için", "altyazı", "konuşma devam ediyor",
-        # EN
-        "subscribe", "like and subscribe", "copyright", "subtitle", 
-        "captioned by", "watching", "next video", "amara.org"
-    ]
-    
-    for yasak in yasakli_listesi:
-        if yasak in text_lower:
-            return "" 
-
-    # 2. LOOP BREAKER
-    if len(text) > 30:
-        words = text.split()
-        unique_words = set(words)
-        ratio = len(unique_words) / len(words) 
-        if ratio < 0.2:
+        try:
+            segments, _ = fw_model.transcribe(audio_np, language=None, initial_prompt=target_prompt, beam_size=1)
+            text = "".join(s.text for s in segments).strip()
+        except Exception as e:
+            print(f"[ERROR] Transcribe: {e}")
             return ""
 
-    # 3. SHORT AUDIO FILTER
-    if len(text) < 2:
+    # --- ESKİ GÜVENİLİR REGEX (İnsaflı Sürüm) ---
+    allowed_chars = r"[a-zA-Z0-9\s\.\,\?\!\-\'\:çÇğĞıİöÖşŞüÜâÂîÎûÛ@%€$£#\(\)\"“”’&+=*]"
+    
+    clean_text = re.sub(allowed_chars, "", text)
+    
+    if len(clean_text) > 0:
         return ""
+
+    # --- FİLTRELER ---
+    text_lower = text.lower()
+    yasakli_listesi = ["abone ol", "altyazı", "konuşma devam", "izlediğiniz", "subtitle", "copyright", "subscribe", "amara.org"]
+    
+    for yasak in yasakli_listesi:
+        if yasak in text_lower: return "" 
+    if len(text) < 2: return ""
             
     return text
 
@@ -125,6 +119,7 @@ def listen_until_silent():
             callback.silent_chunks += 1
         else:
             callback.silent_chunks = 0
+            
         if callback.silent_chunks >= silent_limit:
             callback_done = True
             raise sd.CallbackStop
@@ -132,14 +127,14 @@ def listen_until_silent():
     callback.silent_chunks = 0
     with sd.InputStream(samplerate=FS, channels=1, dtype="float32", blocksize=BLOCKSIZE, callback=callback):
         while not callback_done:
-            sd.sleep(50)
+            sd.sleep(10)
 
     audio_np = np.concatenate(audio_data, axis=0).reshape(-1).astype(np.float32)
     
-    if np.max(np.abs(audio_np)) > 0:
-        audio_np = audio_np / np.max(np.abs(audio_np))
-    
-    if np.sum(np.abs(audio_np)) < 0.1:
+    # --- DÜZELTME BURADA ---
+    # Eğer ses çok kısıksa hem return et hem de haber ver.
+    if rms(audio_np) < 0.01:
+        print("[SYSTEM] Low energy noise detected (Ignored).")
         return
 
     print("Processing...")
@@ -154,6 +149,7 @@ def listen_until_silent():
         print(f"[LATENCY]    {latency:.2f}s")
         print(f"-"*50)
     else:
+        # Eğer RMS yüksekse ama Whisper "anlamsız" bulduysa burası çalışır
         print(f"[SYSTEM] No valid speech detected.")
 
 try:
