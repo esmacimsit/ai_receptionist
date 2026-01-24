@@ -82,4 +82,3 @@ try:
         listen_until_silent()
 except KeyboardInterrupt:
     print("\nSistem kapatıldı.")
-    
