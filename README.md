@@ -23,19 +23,19 @@ This is an ongoing project. Design decisions are intentional and documented.
 
 ## High-Level Architecture
 
-Audio In
+- Audio In
 ↓
-VAD (barge-in aware)
+- VAD (barge-in aware)
 ↓
-STT (self-hosted, small model)
+- STT (self-hosted, small model)
 ↓
-NLU (LLM → JSON only)
+- NLU (LLM → JSON only)
 ↓
-Decision / State Logic
+- Decision / State Logic
 ↓
-Deterministic Response
+- Deterministic Response
 ↓
-Audio Out
+- Audio Out
 
 Key idea:
 The LLM is only used for intent and slot extraction.
